@@ -17,3 +17,4 @@ MANIFEST
 MANIFEST.bak
 META.yml
 Data-Rebuildr.html
+lib/Data/Polymorph.pm
