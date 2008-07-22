@@ -1,0 +1,10 @@
+# for mkdir $dir, 0777
+# [-ValuesAndExpressions::ProhibitLeadingZeros]
+
+# [-BuiltinFunctions::ProhibitStringyEval]
+
+[-Subroutines::ProhibitSubroutinePrototypes]
+
+# no strict 'refs'
+[TestingAndDebugging::ProhibitNoStrict]
+allow = refs

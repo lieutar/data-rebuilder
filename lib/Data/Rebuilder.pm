@@ -3,8 +3,6 @@ use strict;
 use warnings;
 package Data::Rebuilder;
 
-=pod
-
 =head1 NAME
 
 Data::Rebuilder - Builds an object rebuilder.
@@ -52,7 +50,27 @@ use UNIVERSAL qw(isa  can);
 use Carp;
 use Sub::Name;
 use Path::Class;
-require Data::Polymorph;
+use Lexical::Alias;
+use B::Deparse;
+use PadWalker;
+use Data::Polymorph;
+
+
+=head1 STATIC METHODS
+
+=over 4
+
+=item safe_require
+
+  safe_require ( $0 );                                # does not load
+  safe_require ( Path::Class::file( $0 )->absolute ); # does not load
+  safe_require ( 'path/to/module.pm' );               # loads
+  safe_require ( '/absolute/path/to/module.pm');      # does not load
+
+Loads module safery.
+
+=cut
+
 
 {
   my %loaded = ();
@@ -60,6 +78,7 @@ require Data::Polymorph;
     my $lib = shift;
     my $libabs = file($lib)->absolute;
     return if $loaded{$libabs};
+    return if $libabs eq file($0)->absolute;
     $loaded{$libabs} = 1;
     require $lib unless grep{ $libabs eq file($_)->absolute } values %INC;
   }
@@ -129,14 +148,14 @@ sub _indent ($) {
     ([poly => sub{
         my ($self) = @_;
         my $poly = Data::Polymorph->new;
-        my %blank4tie =
+        my %blank =
           (
            Undef     => sub{ 'do{my $a;\$a}' },
            HashRef   => sub{ "{}" },
            ArrayRef  => sub{ "[]" },
            ScalarRef => sub{ 'do{my $a;\$a}' },
-           GlobRef   => sub{ $self->freeze_not_tied($_[0]) },
-           Glob      => sub{ $self->freeze_not_tied($_[0]) },
+           GlobRef   => sub{ $self->poly->apply($_[0] => 'freeze') },
+           Glob      => sub{ $self->poly->apply($_[0] => 'freeze') },
            Str       => sub{ $_[0]. "" },
            Num       => sub{ $_[0]. "" },
           );
@@ -150,17 +169,17 @@ sub _indent ($) {
 
            ArrayRef  => sub{
              my ( $obj, $objexpr ) = @_;
-             (sprintf('@{%s} , %s;', $objexpr), "TIEARRAY")
+             (sprintf('@{%s}', $objexpr), "TIEARRAY")
            },
 
            ScalarRef => sub{
              my ( $obj, $objexpr ) = @_;
-             (sprintf('${%s} , %s;', $objexpr),"TIESCALAR")
+             (sprintf('${%s}', $objexpr),"TIESCALAR")
            },
 
            GlobRef   => sub{
              my ( $obj, $objexpr ) = @_;
-             (sprintf('*{%s} , %s;', $objexpr),"TIEHANDLE")
+             (sprintf('*{%s}', $objexpr),"TIEHANDLE")
            },
 
            Glob      => sub{
@@ -190,240 +209,6 @@ sub _indent ($) {
            Str       => sub{ tied $_[0]    },
            Num       => sub{ tied $_[0]    },
            Any       => sub{ undef },
-          );
-
-        my %freezer =
-          (
-           ###
-           Any   => sub{ confess "caught unsupported type." },
-
-           ###
-           Undef => sub{ 'undef' },
-
-           ###
-           'Str' => sub{ B::perlstring( $_[0] ) },
-
-           ###
-           'Num' => sub{ $_[0] },
-
-           ###
-           'Glob' => sub{ '*{'. $poly->apply( freeze => \$_[0] ). '}' },
-
-           ###
-           'ScalarRef' => sub{
-             join( "\n",
-                   'do{',
-                   '  #ScalarRef',
-                   '  my $__tmp = '.$poly->apply(${$_[0]} => 'freeze').';',
-                   '  \\$__tmp;',
-                   '}' );
-           },
-
-           #################################
-           'CodeRef' => sub{
-
-             require B::Deparse;
-             require PadWalker;
-             my $dp     =  ( $self->{_deparse}
-                             ||= (__PACKAGE__."::B::Deparse")->new );
-             my $closed = PadWalker::closed_over( $_[0] );
-             my $b      = B::svref_2object($_[0]);
-             my $name   = $b->GV->NAME;
-             my @vars =
-               map { my $key = $_;
-                     my $val = $closed->{$key};
-                     sprintf
-                       ( "  my \%s = undef;\n".
-                         '  Lexical::Alias::alias_r( %s , \%s );',
-                         $key,
-                         $self->freeze($val),
-                         $key ); } keys %$closed;
-             my %info = $dp->coderef2textX($_[0]);
-             join( "\n",
-                   "do{",
-                   '  # CodeRef',
-                   sprintf('  %s::safe_require %s;',
-                           __PACKAGE__,
-                           $self->freeze(file($b->FILE)
-                                         ->absolute->stringify)),
-                   (map{ sprintf('  %s = %s;',$_,$_) }@{$info{globals}}),
-                   ( @vars ? '  require Lexical::Alias;' : () ),
-                   @vars,
-                   sprintf('  sub %s', _indent $info{code}),
-                   "}",
-                 );
-           },
-
-           #################################
-           'ArrayRef' => sub{
-
-             my @body = ();
-             my @tied = ();
-             my @weak = ();
-             local $_;
-             my $var = $self->ref_to_var($_[0]);
-
-             for( my $i = 0; $i < @{$_[0]} ; $i++ ) {
-               my $v = $_[0]->[$i];
-               my $tied = tied ( $_[0]->[$i] );
-               push @body, sprintf('    # %s', refaddr( \$_[0]->[$i] ));
-               if( $tied ){
-
-                 push @body, "    undef,";
-                 push @tied , [$i => $tied];
-
-               }
-               elsif( $self->_is_cycled($v) ) {
-                 push @body, "    undef,";
-                 my $stack = $self->_lazy->{ refaddr $v } ||= [];
-                 push( @$stack ,
-                       sprintf('%s->[%s] = %s;',
-                               $var, $i, $self->freeze($v)));
-                 push( @$stack ,
-                       sprintf('Scalar::Util::weaken(%s->[%s]);',
-                              $var, $i))
-                   if isweak($_[0]->[$i]);
-               }
-               else {
-                 push @body , "    ". $self->freeze($v).",";
-                 push @weak , $i , if isweak( $_[0]->[$i] );
-               }
-             }
-
-             join
-               (
-                "\n" ,
-                "do{ ",
-                '  # ArrayRef',
-                "  my \$__tmp = [",
-                @body ,
-                "  ];",
-                "  "._indent( join "\n",
-                              map{ $self->tier('$__tmp->['.$_->[0].']',
-                                               'TIESCALAR',
-                                               $_->[1]) } @tied ),
-                "  "._indent( join "\n",
-                              map{ sprintf(' Scalar::Util::weaken('.
-                                           '  $__tmp->[%s] );' ,
-                                           $_) } @weak ),
-                '  $__tmp;',
-                "}"
-               );
-           },
-
-           #################################
-           'HashRef' => sub{
-
-             my @body = ();
-             my @tied = ();
-             my @weak = ();
-             my $var = $self->ref_to_var($_[0]);
-
-             foreach my $key ( sort keys %{$_[0]} ){
-               my $v = $_[0]->{$key};
-               my $tied = tied ( $_[0]->{$key} );
-               if( $tied ){
-                 push @body ,
-                   sprintf('      %s => undef,',  $self->freeze($key)),
-                 push @tied , [$key => $tied];
-               }
-               elsif( $self->_is_cycled($v) ) {
-                 push @body ,
-                   sprintf('      %s => undef,',  $self->freeze($key));
-                 my $stack = $self->_lazy->{ refaddr $v } ||= [];
-                 push( @$stack , sprintf('%s->{%s} = %s;',
-                                         $var,
-                                         $self->freeze($key),
-                                         $self->freeze($v)));
-                 push( @$stack ,
-                       sprintf('Scalar::Util::weaken(%s->{%s});',
-                               $var,
-                               $self->freeze($key)))
-                   if isweak($_[0]->{$key});
-               }
-               else {
-                 push @body ,
-                   sprintf('      %s => %s,',
-                           $self->freeze($key), $self->freeze($v));
-                 push @weak , $key, if isweak( $_[0]->{$key} );
-               }
-             }
-
-             join
-               (
-                "\n" ,
-                "do{ ",
-                '  # HashRef',
-                "  my \$__tmp = {",
-                @body ,
-                "  };",
-                ( map{ $self->tier('$__tmp->{'.$self->freeze($_->[0]).'}',
-                                   'TIESCALAR',
-                                   $_->[1]) } @tied ),
-                ( map{ sprintf(' Scalar::Util::weaken( \ $__tmp->{%s} );' ,
-                               $self->freeze($_)) }
-                  @weak ),
-                '  $__tmp;',
-                "}"
-               );
-           },
-
-           #################################
-           'GlobRef' => sub{
-             my $glob = shift;
-             my $name = ${$glob} . "";
-             return "\\$name" unless $name =~ /^\*Symbol::GEN/;
-             join("\n",
-                  'do{',
-                  '  # GrobRef',
-                  '  require Symbol;',
-                  '  my $__tmp = Symbol::gensym()',
-                  ( map {
-                      sprintf('  *{$__tmp}{%s} = %s;',
-                              $_,
-                              $self->freeze(*{$glob}{$_}))
-                    }
-                    qw( SCALAR
-                        ARRAY
-                        HASH
-                        CODE )),
-                  ( ( *{$glob}{GLOB} == $glob ||
-                      *{$glob}{GLOB} == *{$glob} )
-                    ? ('  *{$__tmp}{GLOB} = $__tmp;')
-                    : sprintf('  *{$__tmp}{GLOB} = %s;',
-                             $self->freeze(*{$glob}{GLOB}))),
-                  '  $__tmp;',
-                  '}'
-                 );
-           },
-
-           ###
-           'RefRef' => sub{
-             "\\ ". $self->freeze( ${$_[0]} );
-           },
-
-           ###
-           UNIVERSAL => sub {
-             join
-               (
-                "\n",
-                'do{',
-                "  "._indent( $self->module_loader(blessed $_[0]) ),
-                sprintf("  bless(\%s,\n  \%s)",
-                        _indent($poly->super($_[0] => 'freeze')),
-                        $self->freeze(blessed $_[0])),
-                '}'
-                );
-           },
-
-           ###
-           Regexp => sub {
-             join( "\n",
-                   "do{",
-                   "  ". _indent( $self->module_loader('Regexp') ),
-                   sprintf('my $__tmp = %s ;', $self->freeze("". $_[0])),
-                   "}");
-           },
           );
 
         my %module_loader =
@@ -457,74 +242,445 @@ sub _indent ($) {
            },
           );
 
+
+        my %freezer =
+          (
+           ###
+           Any   => sub{ confess "caught unsupported type." },
+
+           ###
+           Undef => sub{ 'undef' },
+
+           ###
+           'Str' => sub{ B::perlstring( $_[0] ) },
+
+           ###
+           'Num' => sub{ $_[0] },
+
+           ###
+           'Glob' => sub{
+             my $obj  = shift;
+             my $name = "" . $obj;
+             return "$name" unless $name =~ /^\*Symbol::GEN/;
+             join("\n",
+                  'do{',
+                  '  # GrobRef',
+                  '  require Symbol;',
+                  '  my $__tmp = Symbol::gensym();',
+                  ( map {
+                    ( *{$obj}{$_}
+                      ? ( sprintf('  *{$__tmp} = %s;',
+                                  $self->freeze(*{$obj}{$_})) )
+                      : () )
+                    } qw( SCALAR
+                          ARRAY
+                          HASH
+                          CODE )),
+                  '  *$__tmp;',
+                  '}' );
+           },
+
+           ###
+           'ScalarRef' => sub{
+             my $obj = shift;
+             join( "\n",
+                   'do{',
+                   '  #ScalarRef',
+                   '  my $__tmp = '.$self->freeze($$obj).';',
+                   '  \\$__tmp;',
+                   '}' );
+           },
+
+           #################################
+           'CodeRef' => sub{
+             my $cv     = shift;
+             my $target = shift || $cv;
+             my $var    = $self->ref_to_var($target);
+
+             my $dp     =  ( $self->{_deparse}
+                             ||= (__PACKAGE__."::B::Deparse")->new );
+             my $closed = PadWalker::closed_over( $cv );
+             my $b      = B::svref_2object($cv);
+             my $name   = $b->GV->NAME;
+             my @vars   = ();
+
+             foreach my $key (keys %$closed) {
+
+               my $val = $closed->{$key};
+
+               if( $self->poly->type($val) eq 'RefRef' &&
+                   $self->_is_cycled($$val)) {
+                 push @vars,
+                   sprintf('  my %s = undef; #cycled RefRef', $key);
+                 my $lazy = $self->_lazy->{refaddr $$val} ||= [];
+                 push
+                   (@$lazy,
+                    'require PadWalker;',
+                    sprintf('${PadWalker::closed_over(%s)->{%s}} = %s;',
+                            $var,
+                            $self->freeze($key),
+                            $self->freeze($$val))
+                    );
+               }
+               else {
+                 push( @vars,
+                       sprintf ( "  my \%s = undef;\n".
+                                 '  Lexical::Alias::alias_r( %s , \%s );',
+                                 $key,
+                                 $self->freeze($val),
+                                 $key ) );
+               }
+
+             }
+
+             my %info = $dp->coderef2textX($cv);
+
+             join( "\n",
+                   "do{",
+                   '  # CodeRef',
+                   sprintf('  %s::safe_require %s;',
+                           __PACKAGE__,
+                           $self->freeze(file($b->FILE)
+                                         ->absolute->stringify)),
+                   (map{ sprintf('  %s = %s;',$_,$_) }@{$info{globals}}),
+                   ( @vars ? '  require Lexical::Alias;' : () ),
+                   @vars,
+                   sprintf('  sub %s', _indent $info{code}),
+                   "}",
+                 );
+           },
+
+           #################################
+           'ArrayRef' => sub{
+
+             my $ref    = shift;
+             my $target = shift || $ref;
+             my $var    = $self->ref_to_var($target);
+
+             my @body = ();
+             my @tied = ();
+             my @weak = ();
+             local $_;
+
+             for( my $i = 0; $i < @{$ref} ; $i++ ) {
+               my $v = $ref->[$i];
+               my $tied = tied ( $ref->[$i] );
+               push @body, sprintf('    # %s', refaddr( \$ref->[$i] ));
+               if( $tied ){
+
+                 push @body, "    undef,";
+                 push @tied , [$i => $tied];
+
+               }
+               elsif( $self->_is_cycled($v) ) {
+
+                 push @body, "    undef,";
+                 my $lazy = $self->_lazy->{ refaddr $v } ||= [];
+                 push( @$lazy ,
+                       sprintf('%s->[%s] = %s;',
+                               $var, $i, $self->freeze($v)));
+                 push( @$lazy ,
+                       sprintf('Scalar::Util::weaken(%s->[%s]);',
+                               $var, $i))
+                   if isweak($ref->[$i]);
+
+               }
+               elsif( $self->poly->type($v) eq 'RefRef'  and
+                      $self->_is_cycled($$v)){
+                 push @body, "    undef, #cycled RefRef ";
+                 my $lazy = $self->_lazy->{refaddr $$v} ||= [];
+                 push @{$lazy}, sprintf('%s->[%s] = %s;',
+                                        $var,
+                                        $i,
+                                        $self->poly->apply( $v => 'freeze'));
+                 push( @$lazy ,
+                       sprintf('Scalar::Util::weaken(%s->[%s]);',
+                               $var, $i))
+                   if isweak($ref->[$i]);
+               }
+               else {
+
+                 push @body , "    ". $self->freeze($v).",";
+                 push @weak , $i , if isweak( $ref->[$i] );
+
+               }
+             }
+
+             join
+               (
+                "\n" ,
+                "do{ ",
+                '  # ArrayRef',
+                "  my \$__tmp = [",
+                @body ,
+                "  ];",
+                "  "._indent( join "\n",
+                              map{ $self->tier('$__tmp->['.$_->[0].']',
+                                               'TIESCALAR',
+                                               $_->[1]) } @tied ),
+                "  "._indent( join "\n",
+                              map{ sprintf(' Scalar::Util::weaken('.
+                                           '  $__tmp->[%s] );' ,
+                                           $_) } @weak ),
+                '  $__tmp;',
+                "}"
+               );
+           },
+
+           #################################
+           'HashRef' => sub{
+             my $ref    = shift;
+             my $target = shift || $ref;
+             my $var    = $self->ref_to_var($target);
+             my @body = ();
+             my @tied = ();
+             my @weak = ();
+
+             foreach my $key ( sort keys %{$ref} ){
+               my $v = $ref->{$key};
+               my $tied = tied ( $ref->{$key} );
+               if( $tied ){
+                 push @body ,
+                   sprintf('      %s => undef,',  $self->freeze($key)),
+                 push @tied , [$key => $tied];
+               }
+               elsif( $self->_is_cycled($v) ) {
+
+                 push @body ,
+                   sprintf('      %s => undef, # cycled', $self->freeze($key));
+
+                 my $lazy = $self->_lazy->{ refaddr $v } ||= [];
+
+                 push( @$lazy , sprintf('%s->{%s} = %s;',
+                                         $var,
+                                         $self->freeze($key),
+                                         $self->freeze($v)));
+
+                 push( @$lazy ,
+                       sprintf('Scalar::Util::weaken(%s->{%s});',
+                               $var,
+                               $self->freeze($key)
+                              )) if isweak($ref->{$key});
+
+               }
+               elsif( $self->poly->type($v) eq 'RefRef'  and
+                      $self->_is_cycled($$v)){
+
+                 push @body, sprintf('      %s => undef, # cycled RefRef',
+                                    $self->freeze($key));
+
+                 my $lazy = $self->_lazy->{refaddr $$v} ||= [];
+
+                 push @{$lazy}, sprintf('%s->{%s} = %s;',
+                                        $var,
+                                        $self->freeze($key),
+                                        $self->freeze($v));
+
+                 push( @$lazy ,
+                       sprintf('Scalar::Util::weaken(%s->{%s});',
+                               $var,
+                               $self->freeze($key),
+                              )) if isweak($ref->{$key});
+
+               }
+               else {
+                 push @body ,
+                   sprintf('      %s => %s,',
+                           $self->freeze($key), $self->freeze($v));
+                 push @weak , $key, if isweak( $ref->{$key} );
+               }
+             }
+
+             join
+               (
+                "\n" ,
+                "do{ ",
+                '  # HashRef',
+                "  my \$__tmp = {",
+                @body ,
+                "  };",
+                ( map{ $self->tier('$__tmp->{'.$self->freeze($_->[0]).'}',
+                                   'TIESCALAR',
+                                   $_->[1]) } @tied ),
+                ( map{ sprintf(' Scalar::Util::weaken( \ $__tmp->{%s} );' ,
+                               $self->freeze($_)) }
+                  @weak ),
+                '  $__tmp;',
+                "}"
+               );
+           },
+
+           #################################
+           'GlobRef' => sub{
+             my $glob   = shift;
+             my $target = shift;
+             my $var    = $self->ref_to_var($target);
+             my $name = "".$$glob;
+
+             return '\\ '.$name
+               if( $name =~ /\*main::(STD(?:IN|OUT|ERR)|ARGV)/ &&
+                   refaddr( $glob ) == refaddr( \$main::{$1} ) );
+
+             my @slots = ();
+             foreach my $slot ( qw(SCALAR HASH ARRAY CODE)) {
+
+               next unless my $ref = *{$glob}{$slot};
+
+               if( $self->poly->type($slot) eq 'RefRef' &&
+                   $self->_is_cycled($$slot) ) {
+                 my $lazy = ($self->_lazy->{refaddr $$slot} ||= []);
+                 push @$lazy,
+                   sprintf('  *{%s} = %s;',
+                           $var,
+                           $self->freeze(*{$glob}{$slot}) );
+               }
+               else {
+                 push @slots,
+                   sprintf('  *{$__tmp} = %s;',
+                           $self->freeze(*{$glob}{$slot}) );
+               }
+
+             }
+             join ("\n",
+                   'do {',
+                   '  require Symbol;',
+                   sprintf('  my $__tmp = Symbol::gensym();', $name),
+                   @slots,
+                   '  $__tmp;',
+                   '}',
+                  );
+           },
+
+           ###
+           'RefRef' => sub{
+             my $ref    = shift;
+             my $target = shift || $ref;
+             "\\ ". $self->freeze( ${$ref} , ${$target} );
+           },
+
+           ###
+           UNIVERSAL => sub {
+             my $obj    = shift;
+             my $target = shift || $obj;
+             join
+               (
+                "\n",
+                'do{',
+                "  "._indent( $self->module_loader(blessed $obj) ),
+                sprintf("  bless(\%s,\n  \%s)",
+                        _indent( $poly->super($obj => 'freeze' , $target) ),
+                        $self->freeze(blessed $obj)),
+                '}'
+                );
+           },
+
+           ###
+           Regexp => sub {
+             my $obj    = shift;
+             my $target = shift || $obj;
+             join( "\n",
+                   "do{",
+                   "  ". _indent( $self->module_loader('Regexp') ),
+                   sprintf('my $__tmp = %s ;', $self->freeze("". $obj)),
+                   "}");
+           },
+          );
+
         my %pre_freeze =
           (
            Any  => sub{
              ()
            },
+
            Ref     => sub{
-             $self->_dumped->{ refaddr $_[0] } = $self->ref_to_var($_[0]);
+             my $ref = shift;
+             my $target = shift || $ref;
+             $self->_dumped->{ refaddr $target } = $self->ref_to_var($target);
              ()
            },
 
            ArrayRef => sub{
-             my $ref = shift;
-             my $var = $self->ref_to_var($ref);
-             $self->poly->super($ref => 'pre_freeze');
+             my $ref    = shift;
+             my $target = shift || $ref;
+             my $var    = $self->ref_to_var($target);
+             $self->poly->super($ref => 'pre_freeze' , $target);
              for( my $i = 0; $i < @$ref; $i++ ) {
                $self->_dumped->{ refaddr( \ $ref->[$i] ) } =
                  sprintf('\ %s->[%s]', $var, $i);
              }
+             ()
            },
 
            HashRef => sub{
-             my $ref = shift;
-             my $var = $self->ref_to_var( $ref );
-             $self->poly->super($ref => 'pre_freeze');
+             my $ref    = shift;
+             my $target = shift || $ref;
+             my $var    = $self->ref_to_var( $target );
+             $self->poly->super($ref => 'pre_freeze' , $target);
              foreach my $key ( keys %$ref ) {
                $self->_dumped->{ refaddr( \ $ref->{ $key } ) } =
                  sprintf('\ %s->{%s}', $var,  $self->freeze($key));
              }
+             ()
            },
           );
 
         my %post_freeze =
           (
-           Any  => sub{},
+           Any  => sub{ () },
 
            Ref  => sub{
-             my $addr = refaddr $_[0];
-             my $lazy = delete($self->_lazy->{$addr}) || [];
-             $self->_complete->{ $addr } = 1;
+             my $ref    = shift;
+             my $target = shift || $ref;
+             my $addr   = refaddr $target;
+             my $lazy   = delete($self->_lazy->{$addr}) || [];
+             $self->_complete->{$addr} = 1;
              @$lazy;
            },
 
            ArrayRef => sub{
-             my $ref = shift;
+             my $ref    = shift;
+             my $target = shift || $ref;
              (
-              $self->poly->super($ref => 'post_freeze') ,
+              $self->poly->super($ref => 'post_freeze', $target) ,
               map { $self->poly->apply( \$ref->[$_] => 'post_freeze') }
               ( 0 ... $#{$ref} )
              );
            },
 
            HashRef      => sub{
-             my $ref = shift;
+             my $ref    = shift;
+             my $target = shift || $ref;
              (
-              $self->poly->super($ref => 'post_freeze') ,
+              $self->poly->super($ref => 'post_freeze' , $target) ,
               ( map { $self->poly->apply( \$ref->{$_} => 'post_freeze') }
                 sort keys %$ref )
              );
            },
           );
 
+        my %sleep =
+          (
+           Any         => sub{ $_[0] },
+           __PACKAGE__ , sub{
+             my %sleepy = %{$_[0]};
+             delete $sleepy{$_} foreach qw( _module_loader_cache
+                                            _deparse
+                                            _result
+                                            _params
+                                            _complete
+                                            _lazy );
+             bless \%sleepy, blessed $_[0];
+           },
+          );
+
 
         foreach ( [tied          => \%tied],
                   [tier          => \%tier],
-                  [blank4tie     => \%blank4tie],
+                  [blank         => \%blank],
                   [module_loader => \%module_loader],
                   [pre_freeze    => \%pre_freeze],
                   [freeze        => \%freezer],
+                  [sleep         => \%sleep],
                   [post_freeze   => \%post_freeze]) {
           my ( $meth, $dic ) = @$_;
           while( my ($class, $sub) = each %{$dic} ) {
@@ -539,10 +695,8 @@ sub _indent ($) {
      [_module_loader_cache => sub{ {}    }],
      [_deparse             => sub{ undef }],
      [_result              => sub{ []    }],
-     [_restoreble_gv       => sub{ {}    }],
      [_params              => sub{ {}    }],
      [_dumped              => sub{ {}    }],
-     [_process             => sub{ {}    }],
      [_complete            => sub{ {}    }],
      [_lazy                => sub{ {}    }],
     );
@@ -567,6 +721,18 @@ sub _indent ($) {
 Creates and returns new object.
 It does not receives any arguments.
 
+=back
+
+=head1 ATTRIBUTES
+
+=over 4
+
+=item C<poly>
+
+Contains C<Datat::Polymorph> instance.
+
+=back
+
 =cut
 
   sub new {
@@ -578,6 +744,11 @@ It does not receives any arguments.
     $self;
   }
 }
+
+
+=head1 DYNAMIC METHODS
+
+=over 4
 
 =item C<ref_to_var>
 
@@ -610,18 +781,9 @@ sub parameterize {
   $self->_params->{ $key } = $rv;
 }
 
-
 =item C<register_freezer>
 
   $builder->register_freezer( 'Target::Class' => sub{ ... } );
-
-=item C<register_module_loader>
-
-  $builder->register_module_loader( 'Foo::Class' => sub{ 'require Foo;' }  );
-
-=item C<register_freezer4tied>
-
-  $builder->register_freezer4tied( "Tie::Foo" => sub{ ... }  );
 
 =cut
 
@@ -630,81 +792,62 @@ sub register_freezer {
   $self->poly->define( $class => freeze => $code );
 }
 
+=item C<register_sleep>
+
+  $builder->register_sleep( 'Target::Class' => sub{
+    my $self = shift;
+    return ( { foo  => $self->foo,
+               bar  => $self->bar,
+               bazz => $self->bazz } , sub{
+      my $obj = shift;
+      bless $obj , blessed $self;
+      $obj->init;
+      $obj;
+    } )
+  } );
+
+Register "sleep" method for the class.
+
+You can drop some properties that is not need for 
+
+The "sleep" method is returns an object and a subroutine reference
+(optionally).
+
+If the method is registered , instead of the object , return values
+of the method is saved by the object of this class.
+
+So , when rebuilding the object , a rebuilder builds by these infor
+mations.
+
+=cut
+
+sub register_sleep {
+  my ($self, $class, $code) = @_;
+  $self->poly->define( $class => sleep => $code );
+}
+
+=item C<register_module_loader>
+
+  $builder->register_module_loader( 'Foo::Class' => sub{ 'require Foo;' }  );
+
+=cut
+
 sub register_module_loader {
   my ($self, $class, $code) = @_;
   $self->poly->define( $class => module_loader => $code );
 }
 
+=item C<module_loader>
 
-=item C<freeze>
+  # returns 'require Symbol;'
+  $exp = $dumper->module_loader('Symbol');
+  
+  # returns 'B::Rebuilder::safe_require "/path/to/your/UNIVERSAL.pm"'
+  $exp = $dumper->module_loader('UNIVERSAL');
 
-  my $icy = $dumper->freeze( $obj );
-
-Makes Perl source code which builds given object.
-This method is not used from out of this class and its subclass or freezer
-method. Because it modifys the dumpers state.
+Returns an expression which reads module for the given package name.
 
 =cut
-
-sub blank4tie {
-  my ( $self, $val ) = @_;
-  $self->poly->apply( $val => 'blank4tie' );
-}
-
-sub tier {
-  my ( $self , $varexpr, $tier, $tied ) = @_;
-  my $pkg = blessed $tied;
-  $tier = "${pkg}::$tier";
-  join ("\n",
-        sprintf('do{'),
-        sprintf('  no warnings;'),
-        sprintf('  my $oldtier = *%s{CODE};', $tier),
-        sprintf('  *%s = sub{ %s }; '       , $tier, $self->freeze($tied)),
-        sprintf('  tie %s , %s;'            , $varexpr, $self->freeze($pkg)),
-        sprintf('  *%s{CODE} = $oldtier;'   , $tier),
-        sprintf('};')
-       );
-}
-
-sub freeze_tied {
-  my ( $self, $val, $tied ) = @_;
-  my $var = $self->ref_to_var( $val );
-  join("\n",
-       sprintf('my %s = %s;', $var,  $self->blank4tie($val)),
-       $self->tier( $self->poly->apply( $val => 'tier', $var ),  $tied ));
-}
-
-sub freeze_not_tied {
-  my ( $self, $val ) = @_;
-  if( $self->poly->type($val) eq 'RefRef'  and
-      $self->_is_cycled($$val)){
-    my $var = $self->ref_to_var( $val );
-    my $lazy = $self->_lazy->{refaddr $$val} ||= [];
-    push @{$lazy}, sprintf('%s = %s;',
-                           $var, $self->poly->apply( $val  => 'freeze' ));
-    return sprintf('my %s = undef;', $var);
-  }
-  else {
-    return sprintf( 'my %s = %s;',
-                    $self->ref_to_var( $val ) ,
-                    _indent( $self->poly->apply( $val  => 'freeze' ) ));
-  }
-}
-
-sub freeze {
-  my ( $self, $val , %opt ) = @_;
-  return $self->poly->apply( $val => freeze =>) unless ref $val;
-  my $addr = refaddr( $val );
-  return $self->_dumped->{ $addr } if exists $self->_dumped->{ $addr };
-  my $var  = $self->ref_to_var( $val );
-  $self->poly->apply( $val => 'pre_freeze' );
-  my $tied = $self->poly->apply( $val => 'tied' );
-  push @{$self->_result} , ($tied 
-                            ? $self->freeze_tied($val, $tied)
-                            : $self->freeze_not_tied($val));
-  push @{$self->_result}, $self->poly->apply( $val => 'post_freeze' );
-  $var;
-}
 
 sub module_loader {
   my ($self, $class) = @_;
@@ -712,7 +855,111 @@ sub module_loader {
   join("\n", $meth ? $meth->($class) : ());
 }
 
-=item C<build_rebulder>
+=item C<blank>
+
+  $exp = $dumper->blank( { foo => 'bar' } ); # returns '{}'
+  $exp = $dumper->blank( [ foo => 'bar' ] ); # returns '[]'
+  $exp = $dumper->blank( FileHandle->new  ); # returns 'Symbol::gensym()'
+
+Returns reference to blank data which typed as same type of the given object.
+
+=cut
+
+sub blank {
+  my ( $self, $val ) = @_;
+  $self->poly->apply( $val => 'blank' );
+}
+
+=item C<tier>
+
+  $exp = $builder->tier( '$foo', 'TIEHANDLE', $obj );
+
+Returns a expression which reties by the given object.
+
+=cut
+
+sub tier {
+  my ( $self , $varexpr, $tier, $tied ) = @_;
+  my $pkg = blessed $tied;
+  join ("\n",
+        sprintf('do{'),
+        sprintf('  no warnings;'),
+        sprintf('  my %%old = ();'),
+        sprintf('  foreach my $s (qw(SCALAR ARRAY HASH CODE)){'),
+        sprintf('     $old{$s} = *%s::%s{$s};', $pkg , $tier),
+        sprintf('  }'),
+        sprintf('  *%s::%s = sub{ %s }; ', $pkg, $tier, $self->freeze($tied)),
+        sprintf('  tie %s , %s;' , $varexpr, $self->freeze($pkg)),
+        sprintf('  delete $%s::{%s};', $pkg, $tier),
+        sprintf('  foreach my $s (qw(SCALAR ARRAY HASH CODE)){'),
+        sprintf('     *%s::%s = $old{$s} if defined $old{$s};', $pkg, $tier),
+        sprintf('  }'),
+        sprintf('};'),
+       );
+}
+
+=item C<freeze>
+
+  my $icy = $dumper->freeze( $obj );
+
+Makes Perl source code which builds given object.
+This method is not used from out of this class and its subclass or a freezer
+method. Because it modifys the dumpers state.
+
+=cut
+
+sub freeze {
+
+  my ( $self, $val ) = @_;
+
+  return $self->poly->apply( $val => freeze => ) unless ref $val;
+
+  my $addr = refaddr( $val );
+
+  return $self->_dumped->{ $addr } if exists $self->_dumped->{ $addr };
+
+  my ($sleep, $rebuilder) = $self->poly->apply( $val => 'sleep' );
+
+  my $var  = $self->ref_to_var( $val );
+
+  $self->poly->apply( $sleep => 'pre_freeze' => $val );
+
+  if( my $tied = $self->poly->apply( $val => 'tied' ) ){
+
+    my $var = $self->ref_to_var( $val );
+
+    push @{$self->_result},
+      join("\n",
+         sprintf('my %s = %s;', $var,  $self->blank($val)),
+         $self->tier( $self->poly->apply( $val => 'tier', $var ),  $tied ));
+
+  }
+  elsif( $self->poly->type($sleep) eq 'RefRef'  and
+         $self->_is_cycled($$sleep)){
+
+    my $lazy = $self->_lazy->{refaddr $$sleep} ||= [];
+    push @{$lazy}, sprintf('%s = %s;',
+                           $var, $self->poly->apply( $sleep  => 'freeze' ,
+                                                     $val ));
+    push @{$self->_result}, sprintf('my %s = undef;', $var);
+  }
+  else {
+    push @{$self->_result},
+      sprintf( 'my %s = %s;',
+               $self->ref_to_var( $val ) ,
+               _indent( $self->poly->apply( $sleep  => 'freeze', $val ) ));
+  }
+
+  push @{$self->_result}, $self->poly->apply( $sleep => 'post_freeze', $val );
+  push ( @{$self->_result},
+         sprintf('%s->(%s);',  $self->freeze($rebuilder), $var) )
+    if $rebuilder;
+
+  $var;
+
+}
+
+=item C<build_rebuilder>
 
   my $icy = $dumper->build_rebulder( $obj );
 
@@ -763,8 +1010,8 @@ sub build_rebuilder {
   return join (
                "\n",
                'do{ ',
-               '    require '.__PACKAGE__.';',
-               '    my $RETVAL = sub (%){',
+               '  require '.__PACKAGE__.';',
+               '  my $RETVAL = sub (%){',
                '    require Scalar::Util; ',
                "    require Carp;",
                '    my %__ARGS__ = @_;',
@@ -779,9 +1026,11 @@ sub build_rebuilder {
 
 
 1; # End of Data::Rebuilder
+
 __END__
 
-=head1 Inrebuildable informations
+
+=back
 
 
 =head1 SEE ALSO

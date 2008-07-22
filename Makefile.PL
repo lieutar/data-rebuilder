@@ -8,13 +8,14 @@ requires 'B';
 requires 'Scalar::Util';
 requires 'UNIVERSAL';
 requires 'Carp';
-requires 'Data::Dumper';
 requires 'Data::Polymorph';
 requires 'Sub::Name';
 requires 'Lexical::Alias';
 requires 'PadWalker';
 requires 'B::Deparse';
+requires 'Path::Class';
 build_requires 'Test::More';
+build_requires 'IO::String';
 
 auto_install;
 
