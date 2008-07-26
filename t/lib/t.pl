@@ -15,7 +15,7 @@ sub dumpsrc($) {
 sub Data::Rebuilder::_t {
   my $b = shift;
   my $a = shift;
-  my $icy = $b->build_rebuilder($a);
+  my $icy = $b->rebuilder($a);
   dumpsrc $icy;
   my $code = eval($icy);
   return $code->(@_) unless $@;

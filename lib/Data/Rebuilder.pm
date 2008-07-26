@@ -36,11 +36,14 @@ our $VERSION = '0.01';
 
 =head1 DESCRIPTION
 
-An instance of this class makes object to executable Perl source. 
-The evaluateion of the source make a subroutine.
+This approach is like to C<Data::Dumper> approach. Moreover,
+an output of this module is not easy to read.
 
-Applying the subroutine is rebuilding a object which is origin of
-the Perl source.
+However this solution can rebuild tied values, weak references, 
+and closures.
+In addition, this solution can parameterize 
+arbitrary nodes of composite. Users can give new objects as 
+arguments of the subroutine which is result.
 
 =cut
 
@@ -90,7 +93,7 @@ sub _indent ($) {
   $_;
 }
 
-{
+{ ############################################################
   package Data::Rebuilder::B::Deparse;
   our @ISA = qw( B::Deparse );
 
@@ -140,7 +143,7 @@ sub _indent ($) {
       $ret;
     }
   }
-}
+} ############################################################
 
 
 {
@@ -313,6 +316,7 @@ sub _indent ($) {
                  push @vars,
                    sprintf('  my %s = undef; #cycled RefRef', $key);
                  my $lazy = $self->_lazy->{refaddr $$val} ||= [];
+
                  push
                    (@$lazy,
                     'require PadWalker;',
@@ -729,7 +733,7 @@ It does not receives any arguments.
 
 =item C<poly>
 
-Contains C<Datat::Polymorph> instance.
+Contains C<Data::Polymorph> instance.
 
 =back
 
@@ -743,6 +747,7 @@ Contains C<Datat::Polymorph> instance.
     }
     $self;
   }
+
 }
 
 
@@ -752,9 +757,9 @@ Contains C<Datat::Polymorph> instance.
 
 =item C<ref_to_var>
 
-  my $var = $builder->ref_to_var();
+  my $var = $builder->ref_to_var( $ref ); # returns $__17898432__
 
-Makes a reference to variable name.
+Makes a reference to a variable name.
 
 =cut
 
@@ -772,7 +777,7 @@ sub _is_cycled {
 
   $builder->parameterize( a_object => $a_object );
 
-Register a object as a parameter of rebuilders.
+Register an object as a parameter of rebuilders.
 
 =cut
 
@@ -784,6 +789,15 @@ sub parameterize {
 =item C<register_freezer>
 
   $builder->register_freezer( 'Target::Class' => sub{ ... } );
+
+same as
+
+  $builder->poly->define( 'Target::Class' => freeze => sub{ ... }  );
+
+Registers freezer method for the types (or classes).
+
+Customization of this approach is not easy way. As other way, you can customize
+by C<register_sleep> and C<register_module_loader>.
 
 =cut
 
@@ -806,18 +820,15 @@ sub register_freezer {
     } )
   } );
 
-Register "sleep" method for the class.
+Registers "sleep" method for the class.
 
-You can drop some properties that is not need for 
+You can drop some properties that is not necessary
+for the serialization by these methods.
 
-The "sleep" method is returns an object and a subroutine reference
-(optionally).
-
-If the method is registered , instead of the object , return values
-of the method is saved by the object of this class.
-
-So , when rebuilding the object , a rebuilder builds by these infor
-mations.
+The "sleep" method returns an object and an optional subroutine reference.
+They are a information for serializer and a restructuring procedure for 
+the information.
+So , when rebuilding the object , a rebuilder uses these informations.
 
 =cut
 
@@ -829,6 +840,11 @@ sub register_sleep {
 =item C<register_module_loader>
 
   $builder->register_module_loader( 'Foo::Class' => sub{ 'require Foo;' }  );
+
+Registers a module loader builder.
+The default method of this searches files from any CVs 
+in the symbol table of the class, and builds loading code 
+with these information.
 
 =cut
 
@@ -861,7 +877,7 @@ sub module_loader {
   $exp = $dumper->blank( [ foo => 'bar' ] ); # returns '[]'
   $exp = $dumper->blank( FileHandle->new  ); # returns 'Symbol::gensym()'
 
-Returns reference to blank data which typed as same type of the given object.
+A return value of this method is for tiers.
 
 =cut
 
@@ -874,7 +890,7 @@ sub blank {
 
   $exp = $builder->tier( '$foo', 'TIEHANDLE', $obj );
 
-Returns a expression which reties by the given object.
+Returns a expression which ties variable with the tied object.
 
 =cut
 
@@ -903,8 +919,8 @@ sub tier {
   my $icy = $dumper->freeze( $obj );
 
 Makes Perl source code which builds given object.
-This method is not used from out of this class and its subclass or a freezer
-method. Because it modifys the dumpers state.
+This method should not be used from applications, because 
+it modifies the objects state. This method should be used from extensions.
 
 =cut
 
@@ -959,15 +975,15 @@ sub freeze {
 
 }
 
-=item C<build_rebuilder>
+=item C<rebuilder>
 
   my $icy = $dumper->build_rebulder( $obj );
 
-Builds Perls source code which is object builder subroutine.
+Builds Perl source code which is object rebuilder subroutine.
 
 =cut
 
-sub build_rebuilder {
+sub rebuilder {
 
   my ($self, $rv) = @_;
   return sprintf('sub{%s}', $self->freeze($rv))  unless ref $rv;
@@ -1036,6 +1052,8 @@ __END__
 =head1 SEE ALSO
 
 =over 4
+
+=item C<Data::Dumper>
 
 =back
 

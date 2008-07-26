@@ -1,16 +1,54 @@
 Data-Rebuilder
 
-The README is used to introduce the module and provide instructions on
-how to install the module, any machine dependencies it may have (for
-example C compilers and installed libraries) and any other information
-that should be provided before the module is installed.
+Like Data::Dumper. But it rebuilds more.
 
-A README file is required for CPAN modules since CPAN extracts the README
-file from a module distribution so that people browsing the archive
-can use it to get an idea of the module's uses. It is usually a good idea
-to provide version information here so that people can decide whether
-fixes for the module are worth downloading.
+ * Tied variable.
+ * Cycled closure.
+ * Any objects , and loading its module files.
 
+In addition, this module provides easy way to parameterize arbitrary node
+of the composite.
+
+e.g.
+
+  use Data::Rebuilder;
+  my $target = [
+                 [
+                   [],
+                   [],
+                 ],
+               ];
+  my $b = Data::Rebuilder->new();
+  $b->parameterize( foo => \$target->[0]->[1] );
+  my $src = $b->rebuilder( $target );
+  my $rebuilder = eval $src;
+  my $obj = $rebuilder->( foo => [ 0 ... 9 ] );
+  
+  use Data::Dumper;
+  print Dumper $obj;
+
+This code prints:
+
+  $VAR1 = [
+            [
+              [],
+              [
+                0,
+                1,
+                2,
+                3,
+                4,
+                5,
+                6,
+                7,
+                8,
+                9,
+              ]
+            ]
+          ];
+
+
+============================================================================
 
 INSTALLATION
 
