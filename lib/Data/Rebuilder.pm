@@ -99,9 +99,11 @@ sub _indent ($) {
 
   sub coderef2textX{
     my $self = shift;
+    my $code = $self->coderef2text( @_ );
     (
-     globals => ( $self->{' globals '} = [] ),
-     code    => $self->coderef2text( @_ )
+     globals => [ keys %{$self->{' globals '}} ],
+     stashes => [ keys %{$self->{' stashes '}} ],
+     code    => $code
     );
   }
 
@@ -114,6 +116,7 @@ sub _indent ($) {
       my $gv = shift;
       Carp::confess() unless ref($gv) eq "B::GV";
       my $stash = $gv->STASH->NAME;
+      $self->{' stashes '}->{$stash} = 1;
       my $name = $gv->SAFENAME;
       if ($stash eq 'main' && $name =~ /^::/) {
 	$stash = '::';
@@ -139,7 +142,7 @@ sub _indent ($) {
       my $ret = $self->SUPER::stash_variable(@_);
       my $name = $ret;
       $name =~ s/^\W//;
-      push @{$self->{' globals '}}, $ret unless $globalnames{$name};
+      $self->{' globals '}->{$ret} = 1 unless $globalnames{$name};
       $ret;
     }
   }
@@ -221,6 +224,11 @@ sub _indent ($) {
            UNIVERSAL =>  sub{
              my $obj = shift;
              my $class = blessed $obj || $obj;
+             my $pm = $class;
+             $pm =~ s#::#/#g;
+             $pm =~ s#$#.pm#;
+             return "require $class;" if exists $INC{$pm};
+
              my $stashglob = do{no strict 'refs'; *{"${class}::"}};
              my %stash = %{$stashglob};
              my %files;
@@ -339,13 +347,13 @@ sub _indent ($) {
 
              my %info = $dp->coderef2textX($cv);
 
+             foreach my $stash ( $b->STASH->NAME , @{$info{stashes}} ){
+               $self->_stashes->{$stash} = 1;
+             }
+
              join( "\n",
                    "do{",
                    '  # CodeRef',
-                   sprintf('  %s::safe_require %s;',
-                           __PACKAGE__,
-                           $self->freeze(file($b->FILE)
-                                         ->absolute->stringify)),
                    (map{ sprintf('  %s = %s;',$_,$_) }@{$info{globals}}),
                    ( @vars ? '  require Lexical::Alias;' : () ),
                    @vars,
@@ -566,11 +574,11 @@ sub _indent ($) {
            UNIVERSAL => sub {
              my $obj    = shift;
              my $target = shift || $obj;
+             $self->_stashes->{blessed $obj} = 1;
              join
                (
                 "\n",
                 'do{',
-                "  "._indent( $self->module_loader(blessed $obj) ),
                 sprintf("  bless(\%s,\n  \%s)",
                         _indent( $poly->super($obj => 'freeze' , $target) ),
                         $self->freeze(blessed $obj)),
@@ -667,7 +675,7 @@ sub _indent ($) {
            Any         => sub{ $_[0] },
            __PACKAGE__ , sub{
              my %sleepy = %{$_[0]};
-             delete $sleepy{$_} foreach qw( _module_loader_cache
+             delete $sleepy{$_} foreach qw( _stashes
                                             _deparse
                                             _result
                                             _params
@@ -696,13 +704,13 @@ sub _indent ($) {
         $poly;
       }],
 
-     [_module_loader_cache => sub{ {}    }],
-     [_deparse             => sub{ undef }],
-     [_result              => sub{ []    }],
-     [_params              => sub{ {}    }],
-     [_dumped              => sub{ {}    }],
-     [_complete            => sub{ {}    }],
-     [_lazy                => sub{ {}    }],
+     [_stashes  => sub{ {}    }],
+     [_deparse  => sub{ undef }],
+     [_result   => sub{ []    }],
+     [_params   => sub{ {}    }],
+     [_dumped   => sub{ {}    }],
+     [_complete => sub{ {}    }],
+     [_lazy     => sub{ {}    }],
     );
 
   sub{
@@ -1016,6 +1024,7 @@ sub rebuilder {
                    $dkey, $slot) );
   }
 
+  $self->_stashes({});
   $self->_dumped( $_dumped );
   $self->_result( \@result );
   $self->_complete( $_complete  );
@@ -1027,6 +1036,9 @@ sub rebuilder {
                "\n",
                'do{ ',
                '  require '.__PACKAGE__.';',
+               ( map{
+                 "  ".$self->module_loader($_)
+               }(keys %{$self->_stashes})),
                '  my $RETVAL = sub (%){',
                '    require Scalar::Util; ',
                "    require Carp;",
